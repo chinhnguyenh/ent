@@ -1560,6 +1560,9 @@ func (b *blobBuilder) Lazy() *blobBuilder {
 // go to both blob storage and the bytes column, while reads prefer blob
 // storage (if a key exists) and fall back to the bytes column.
 //
+// Once existing rows are copied to blob storage, replace DualWrite with SwitchRead
+// to stop using the bytes column, and then remove SwitchRead to drop it.
+//
 // The optional columnType argument overrides the default database column type
 // (per dialect) to avoid schema drift when migrating from an existing column.
 // For example, when migrating a JSON column to blob storage:
@@ -1572,6 +1575,25 @@ func (b *blobBuilder) Lazy() *blobBuilder {
 //		})
 func (b *blobBuilder) DualWrite(columnType ...map[string]string) *blobBuilder {
 	b.desc.BlobDualWrite = true
+	if len(columnType) > 0 {
+		b.desc.BlobDWSchemaType = columnType[0]
+	}
+	return b
+}
+
+// SwitchRead replaces DualWrite once existing rows are copied to blob storage. The field
+// is read and written in blob storage only, and the generated code no longer uses the
+// bytes column. The column stays in the schema, made nullable, until SwitchRead is removed
+// to drop it. Pass it the same columnType as DualWrite, so the column is not altered.
+//
+//	field.Blob("payload").
+//		SwitchRead(map[string]string{
+//			dialect.MySQL:    "json",
+//			dialect.Postgres: "jsonb",
+//			dialect.SQLite:   "json",
+//		})
+func (b *blobBuilder) SwitchRead(columnType ...map[string]string) *blobBuilder {
+	b.desc.BlobSwitchRead = true
 	if len(columnType) > 0 {
 		b.desc.BlobDWSchemaType = columnType[0]
 	}
@@ -1608,6 +1630,9 @@ func (b *blobBuilder) Nillable() *blobBuilder {
 
 // Descriptor implements the ent.Field interface by returning its descriptor.
 func (b *blobBuilder) Descriptor() *Descriptor {
+	if b.desc.BlobSwitchRead && (b.desc.BlobDualWrite || b.desc.BlobLazy) {
+		b.desc.Err = errors.New("SwitchRead replaces DualWrite, and cannot be used with it or with Lazy")
+	}
 	return b.desc
 }
 
@@ -1635,9 +1660,10 @@ type Descriptor struct {
 	DeprecatedReason string                                        // deprecation reason.
 	BlobKey          func(context.Context, []byte) (string, error) // blob key generation function.
 	BlobDualWrite    bool                                          // dual-write mode: write to both blob storage and bytes column.
+	BlobSwitchRead   bool                                          // switch-read mode: blob storage only, the bytes column is kept until dropped.
 	BlobLazy         bool                                          // lazy loading: don't auto-load blob data on scan.
 	BlobCheckRefs    bool                                          // check for rows still holding a key before deleting the object.
-	BlobDWSchemaType map[string]string                             // override the schema type for the dual-write column.
+	BlobDWSchemaType map[string]string                             // override the schema type for the dual-write or switch-read column.
 	Err              error
 }
 
